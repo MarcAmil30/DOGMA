@@ -9,10 +9,7 @@ __pycache__/
 .DS_Store
 
 # Ignore large reference genome and outputs
-reference_genome/
-dogma_outputs/
-static/pdbs/
-rna-dashboard/public/static/pdbs/
+
 *.log
 scratch/
 venv/
