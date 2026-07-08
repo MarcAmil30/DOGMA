@@ -1,0 +1,3 @@
+[submodule "alphagenome"]
+	path = alphagenome
+	url = https://github.com/google-deepmind/alphagenome.git

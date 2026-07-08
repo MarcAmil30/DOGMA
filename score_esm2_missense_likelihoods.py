@@ -28,6 +28,11 @@ Scoring:
 
   Negative log_likelihood_ratio means the mutant amino acid is less likely than
   the reference amino acid in that sequence context.
+
+Hardware acceleration:
+  Apple Silicon (MPS) is automatically detected and preferred over CPU.
+  CUDA is preferred over MPS when both are available (server/Linux).
+  Override with --device cpu | cuda | mps.
 """
 
 from __future__ import annotations
@@ -49,6 +54,28 @@ from transformers import AutoModelForMaskedLM, AutoTokenizer
 STANDARD_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
 
+# ---------------------------------------------------------------------------
+# Device selection – MPS (Apple Silicon) aware
+# ---------------------------------------------------------------------------
+
+def get_best_device() -> torch.device:
+    """
+    Return the best available device with the following priority:
+      1. CUDA  (NVIDIA / server GPU)
+      2. MPS   (Apple Silicon Metal Performance Shaders)
+      3. CPU   (fallback)
+    """
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
 @dataclass
 class ParsedVariant:
     variant_id: str
@@ -58,6 +85,10 @@ class ParsedVariant:
     alt_aa: str
     original_label: str
 
+
+# ---------------------------------------------------------------------------
+# FASTA / sequence utilities
+# ---------------------------------------------------------------------------
 
 def read_fasta(path: str) -> str:
     """Read a one-sequence FASTA file and return an uppercase protein sequence."""
@@ -79,6 +110,10 @@ def read_fasta(path: str) -> str:
         )
     return seq
 
+
+# ---------------------------------------------------------------------------
+# Clinical significance normalisation
+# ---------------------------------------------------------------------------
 
 def normalise_clinsig(label: str, strict: bool = False) -> Optional[str]:
     """
@@ -133,6 +168,10 @@ def normalise_clinsig(label: str, strict: bool = False) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# VEP row parsing
+# ---------------------------------------------------------------------------
+
 def parse_single_missense_row(row: pd.Series, strict_labels: bool) -> Tuple[Optional[ParsedVariant], Optional[str]]:
     """Parse a VEP row into a single amino-acid substitution."""
     variant_id = str(row.get("#Uploaded_variation", "")).strip()
@@ -174,6 +213,10 @@ def parse_single_missense_row(row: pd.Series, strict_labels: bool) -> Tuple[Opti
     ), None
 
 
+# ---------------------------------------------------------------------------
+# Transcript ranking helpers
+# ---------------------------------------------------------------------------
+
 def tsl_rank(value: object) -> int:
     """Lower TSL values are better. Missing/non-numeric is ranked poorly."""
     try:
@@ -199,6 +242,10 @@ def appris_rank(value: object) -> int:
         return 10
     return 999
 
+
+# ---------------------------------------------------------------------------
+# Variant table construction
+# ---------------------------------------------------------------------------
 
 def build_variant_table(
     vep_path: str,
@@ -356,6 +403,10 @@ def build_variant_table(
     return selected_df, skipped_df, warnings_df
 
 
+# ---------------------------------------------------------------------------
+# Sequence windowing
+# ---------------------------------------------------------------------------
+
 def make_centered_window(seq: str, pos_1based: int, max_aa_window: int) -> Tuple[str, int, int, int]:
     """
     Return a sequence window, local 0-based variant index, and absolute start/end.
@@ -378,12 +429,20 @@ def make_centered_window(seq: str, pos_1based: int, max_aa_window: int) -> Tuple
     return seq[start:end], local_idx, start, end
 
 
+# ---------------------------------------------------------------------------
+# Token helpers
+# ---------------------------------------------------------------------------
+
 def aa_token_id(tokenizer, aa: str) -> int:
     tok_id = tokenizer.convert_tokens_to_ids(aa)
     if tok_id is None or tok_id == tokenizer.unk_token_id:
         raise ValueError(f"Could not convert amino acid {aa!r} to a tokenizer ID")
     return int(tok_id)
 
+
+# ---------------------------------------------------------------------------
+# Single-variant scoring (MPS-safe)
+# ---------------------------------------------------------------------------
 
 @torch.inference_mode()
 def score_variant(
@@ -396,7 +455,14 @@ def score_variant(
     device: torch.device,
     max_aa_window: int,
 ) -> Dict[str, object]:
-    """Score one substitution using masked-token probabilities."""
+    """
+    Score one substitution using masked-token probabilities.
+
+    MPS note: logits are cast to float32 before log-softmax because MPS does
+    not support float64, and some ESM2 heads output float32 while others may
+    arrive as bfloat16.  The .cpu() call before Python float conversion is
+    required for MPS tensors.
+    """
     if sequence[pos_1based - 1] != ref_aa:
         raise ValueError(
             f"Reference mismatch at position {pos_1based}: "
@@ -420,12 +486,14 @@ def score_variant(
     mask_index = int(mask_positions.item())
 
     output = model(**encoded)
-    logits = output.logits[0, mask_index]
-    log_probs = torch.log_softmax(logits.float(), dim=-1)
+    # Cast to float32 – required for MPS (no float64) and safe for CUDA/CPU.
+    logits = output.logits[0, mask_index].float()
+    log_probs = torch.log_softmax(logits, dim=-1)
 
     ref_id = aa_token_id(tokenizer, ref_aa)
     alt_id = aa_token_id(tokenizer, alt_aa)
 
+    # .cpu() is required before converting MPS tensors to Python scalars.
     ref_logp = float(log_probs[ref_id].cpu())
     alt_logp = float(log_probs[alt_id].cpu())
     llr = alt_logp - ref_logp
@@ -441,6 +509,162 @@ def score_variant(
         "window_length": len(window_seq),
     }
 
+
+# ---------------------------------------------------------------------------
+# High-level public API (used by Gradio dashboard)
+# ---------------------------------------------------------------------------
+
+def load_model_and_tokenizer(
+    model_name: str = "facebook/esm2_t33_650M_UR50D",
+    device: Optional[torch.device] = None,
+    use_fp16: bool = False,
+) -> Tuple[object, object, torch.device]:
+    """
+    Load ESM2 model and tokenizer onto the best available device.
+
+    Returns (model, tokenizer, device).
+    """
+    if device is None:
+        device = get_best_device()
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.mask_token is None:
+        raise ValueError("The selected tokenizer does not have a mask token.")
+
+    load_kwargs: Dict[str, object] = {}
+    # fp16 is only meaningful on CUDA; MPS handles its own precision internally.
+    if device.type == "cuda" and use_fp16:
+        load_kwargs["torch_dtype"] = torch.float16
+
+    model = AutoModelForMaskedLM.from_pretrained(model_name, **load_kwargs)
+    model.to(device)
+    model.eval()
+
+    return model, tokenizer, device
+
+
+def score_all(
+    vep_path: str,
+    fasta_path: str,
+    model_name: str = "facebook/esm2_t33_650M_UR50D",
+    device: Optional[torch.device] = None,
+    use_fp16: bool = False,
+    max_aa_window: int = 1022,
+    strict_labels: bool = False,
+    dedupe_mode: str = "id",
+    progress_callback=None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    End-to-end pipeline: load data → parse variants → load model → score.
+
+    Parameters
+    ----------
+    vep_path         : Path to VEP TSV file.
+    fasta_path       : Path to reference protein FASTA.
+    model_name       : Hugging Face model identifier.
+    device           : torch.device to use (None = auto-detect).
+    use_fp16         : Use float16 on CUDA (ignored on MPS/CPU).
+    max_aa_window    : Maximum amino-acid window length for ESM2.
+    strict_labels    : Skip uncertain/conflicting ClinSig labels.
+    dedupe_mode      : 'id' or 'mutation'.
+    progress_callback: Optional callable(current, total, message) for Gradio.
+
+    Returns
+    -------
+    scores_df        : DataFrame with one row per scored variant.
+    skipped_df       : DataFrame of skipped rows.
+    warnings_df      : DataFrame of deduplication warnings.
+    """
+    if device is None:
+        device = get_best_device()
+
+    # ---- 1. Read reference sequence ----
+    reference_sequence = read_fasta(fasta_path)
+
+    # ---- 2. Build variant table ----
+    variants, skipped_df, warnings_df = build_variant_table(
+        vep_path,
+        reference_sequence,
+        strict_labels=strict_labels,
+        dedupe_mode=dedupe_mode,
+    )
+
+    # ---- 3. Load model ----
+    model, tokenizer, device = load_model_and_tokenizer(
+        model_name=model_name,
+        device=device,
+        use_fp16=use_fp16,
+    )
+
+    # Keep window inside model's positional limit.
+    model_max_positions = getattr(model.config, "max_position_embeddings", None)
+    if model_max_positions is not None:
+        safe_window = max(1, int(model_max_positions) - 2)
+        if max_aa_window > safe_window:
+            max_aa_window = safe_window
+
+    # ---- 4. Score variants ----
+    score_records: List[Dict[str, object]] = []
+    scoring_skips: List[Dict[str, object]] = []
+    total = len(variants)
+
+    for i, (_, row) in enumerate(variants.iterrows()):
+        if progress_callback is not None:
+            progress_callback(i, total, f"Scoring variant {i+1}/{total}: {row.get('variant_id', '')}")
+
+        try:
+            score = score_variant(
+                model=model,
+                tokenizer=tokenizer,
+                sequence=reference_sequence,
+                pos_1based=int(row["protein_position_int"]),
+                ref_aa=str(row["ref_aa"]),
+                alt_aa=str(row["alt_aa"]),
+                device=device,
+                max_aa_window=int(max_aa_window),
+            )
+            base = {
+                "variant_id": row["variant_id"],
+                "clinical_class": row["clinical_class"],
+                "protein_position": int(row["protein_position_int"]),
+                "ref_aa": row["ref_aa"],
+                "alt_aa": row["alt_aa"],
+                "protein_change": f"{row['ref_aa']}{int(row['protein_position_int'])}{row['alt_aa']}",
+                "original_CLIN_SIG": row.get("original_CLIN_SIG", ""),
+                "Feature": row.get("Feature", ""),
+                "MANE": row.get("MANE", ""),
+                "MANE_SELECT": row.get("MANE_SELECT", ""),
+                "SYMBOL": row.get("SYMBOL", ""),
+            }
+            base.update(score)
+            score_records.append(base)
+        except Exception as exc:
+            scoring_skips.append(
+                {
+                    "variant_id": row.get("variant_id", ""),
+                    "protein_position": row.get("protein_position_int", ""),
+                    "ref_aa": row.get("ref_aa", ""),
+                    "alt_aa": row.get("alt_aa", ""),
+                    "skip_reason": f"scoring_error: {exc}",
+                }
+            )
+
+    if progress_callback is not None:
+        progress_callback(total, total, "Scoring complete.")
+
+    scores_df = pd.DataFrame(score_records)
+
+    # Merge any scoring skips into the skipped table.
+    if scoring_skips:
+        skip_extra = pd.DataFrame(scoring_skips)
+        skipped_df = pd.concat([skipped_df, skip_extra], ignore_index=True)
+
+    return scores_df, skipped_df, warnings_df
+
+
+# ---------------------------------------------------------------------------
+# Plotting (CLI / static output)
+# ---------------------------------------------------------------------------
 
 def plot_distributions(scores: pd.DataFrame, out_prefix: str, bins: int = 30) -> None:
     """Create histogram and boxplot for benign/pathogenic ESM log-likelihood ratios.
@@ -531,6 +755,11 @@ def plot_distributions(scores: pd.DataFrame, out_prefix: str, bins: int = 30) ->
     plt.savefig(f"{out_prefix}.llr_boxplot.png", dpi=300)
     plt.close()
 
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Deduplicate VEP missense variants, score with ESM2-650M, and plot benign/pathogenic distributions."
@@ -546,12 +775,15 @@ def main() -> None:
     parser.add_argument(
         "--device",
         default="auto",
-        help="auto, cpu, cuda, cuda:0, etc. Default: auto",
+        help=(
+            "Device override: auto (default) | cpu | cuda | cuda:0 | mps. "
+            "'auto' selects CUDA > MPS > CPU."
+        ),
     )
     parser.add_argument(
         "--fp16",
         action="store_true",
-        help="Use float16 on CUDA to reduce memory use",
+        help="Use float16 on CUDA to reduce memory use (ignored on MPS/CPU)",
     )
     parser.add_argument(
         "--max-aa-window",
@@ -572,6 +804,13 @@ def main() -> None:
     )
     parser.add_argument("--bins", type=int, default=30, help="Histogram bins")
     args = parser.parse_args()
+
+    # ---- Device selection ----
+    if args.device == "auto":
+        device = get_best_device()
+    else:
+        device = torch.device(args.device)
+    print(f"Using device: {device}")
 
     reference_sequence = read_fasta(args.fasta)
     print(f"Reference sequence length: {len(reference_sequence)} aa")
@@ -594,17 +833,11 @@ def main() -> None:
         selection_warnings.to_csv(f"{args.out_prefix}.selection_warnings.tsv", sep="\t", index=False)
         print(f"Selection warnings written to: {args.out_prefix}.selection_warnings.tsv")
 
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
-    print(f"Using device: {device}")
-
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.mask_token is None:
         raise ValueError("The selected tokenizer does not have a mask token.")
 
-    load_kwargs = {}
+    load_kwargs: Dict[str, object] = {}
     if device.type == "cuda" and args.fp16:
         load_kwargs["torch_dtype"] = torch.float16
 

@@ -1,0 +1,19 @@
+# Ignore python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore IDE settings
+.vscode/
+.idea/
+.DS_Store
+
+# Ignore large reference genome and outputs
+reference_genome/
+dogma_outputs/
+static/pdbs/
+rna-dashboard/public/static/pdbs/
+*.log
+scratch/
+venv/
+.venv/

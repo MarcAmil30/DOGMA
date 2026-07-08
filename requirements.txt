@@ -1,0 +1,19 @@
+# Core ML
+torch
+transformers
+
+# Data / science
+pandas
+numpy
+biopython
+scipy
+
+# Visualisation
+matplotlib
+plotly
+
+# Web UI
+gradio>=4.0
+
+# Progress bars
+tqdm

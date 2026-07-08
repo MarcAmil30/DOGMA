@@ -447,15 +447,7 @@ custom_css = """
 }
 """
 
-with gr.Blocks(
-    theme=gr.themes.Soft(
-        primary_hue="violet",
-        secondary_hue="slate",
-    ),
-    css=custom_css,
-    title="DOGMA",
-) as demo:
-
+def draw_dna_ui():
     gr.HTML(
         """
         <div id="dogma-title">
@@ -625,4 +617,14 @@ with gr.Blocks(
 # ----------------------------
 # Cell 6: Launch app
 # ----------------------------
-demo.launch(share=True, debug=True)
+if __name__ == "__main__":
+    with gr.Blocks(
+        theme=gr.themes.Soft(
+            primary_hue="violet",
+            secondary_hue="slate",
+        ),
+        css=custom_css,
+        title="DOGMA",
+    ) as demo:
+        draw_dna_ui()
+    demo.launch(share=True, debug=True)
