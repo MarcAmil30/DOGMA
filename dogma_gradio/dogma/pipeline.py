@@ -178,7 +178,7 @@ def run_dogma_pipeline(
             errors.append(f"ViennaRNA failed: {exc}")
 
     if not isoform_df.empty:
-        _notify(progress_callback, 0.75, "Scoring reference and resolvable alternate proteins with ESM2")
+        _notify(progress_callback, 0.75, "Scoring changed protein positions with masked ESM2 inference")
         try:
             esm_df = run_esm_for_isoforms(
                 isoform_df,
@@ -187,10 +187,15 @@ def run_dogma_pipeline(
                 device=esm_device,
                 max_sequence_length=int(esm_max_sequence_length),
             )
-            resolved = int(esm_df["alternate_avg_log_likelihood"].notna().sum()) if not esm_df.empty else 0
+            score_column = "delta_position_log_probability_alt_minus_ref"
+            resolved = (
+                int(esm_df[score_column].notna().sum())
+                if not esm_df.empty and score_column in esm_df.columns
+                else 0
+            )
             statuses.append(
                 f"ESM2: success; transcript rows={len(esm_df):,}; "
-                f"ALT-vs-REF comparisons={resolved:,}"
+                f"masked-position ALT-vs-REF comparisons={resolved:,}"
             )
         except Exception as exc:
             errors.append(f"ESM2 failed: {exc}")
@@ -211,8 +216,9 @@ def run_dogma_pipeline(
         ),
         "esm_rows": len(esm_df),
         "esm_alt_ref_comparisons": (
-            int(esm_df["alternate_avg_log_likelihood"].notna().sum())
-            if not esm_df.empty and "alternate_avg_log_likelihood" in esm_df.columns
+            int(esm_df["delta_position_log_probability_alt_minus_ref"].notna().sum())
+            if not esm_df.empty
+            and "delta_position_log_probability_alt_minus_ref" in esm_df.columns
             else 0
         ),
     }
@@ -252,7 +258,8 @@ def run_dogma_pipeline(
             ),
             "esm": (
                 "Alternate proteins are generated only for direct CDS substitutions. "
-                "Intronic/splice variants are not converted into an invented protein sequence."
+                "ESM2 compares REF and ALT amino-acid log-probabilities only at masked "
+                "changed positions; it does not score every residue in the protein."
             ),
         },
     }
@@ -271,8 +278,8 @@ def run_dogma_pipeline(
         "cDNA sequence for mature-mRNA folding."
     )
     status_lines.append(
-        "- ESM interpretation: ALT−REF average log-likelihood is protein-sequence "
-        "naturalness, not a pathogenicity probability."
+        "- ESM interpretation: masked-position ALT−REF log-probability compares the "
+        "two residues in the same protein context; it is not a pathogenicity probability."
     )
 
     _notify(progress_callback, 1.0, "Done")

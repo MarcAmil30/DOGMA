@@ -8,4 +8,4 @@ biopython>=1.83
 # project-specific package already used in your DOGMA notebooks. Install it
 # from the same repository/environment that provides:
 #   ViennaRNAInput, ViennaRNAConfig, run_viennarna
-#   ESM2ScoringInput, ESM2ScoringConfig, run_esm2_score
+#   ESM2SampleInput, ESM2SampleConfig, run_esm2_sample

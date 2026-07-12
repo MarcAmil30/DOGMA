@@ -95,8 +95,8 @@ with gr.Blocks(title="DOGMA: DNA → RNA → Protein") as demo:
         """
 # DOGMA variant pipeline
 Enter one **GRCh38** variant. The app runs selected AlphaGenome variant scorers,
-folds a strand-aware local RNA window with ViennaRNA, and scores all translated
-Ensembl protein isoforms with ESM2 when a complete alternate protein can be reconstructed.
+folds a strand-aware local RNA window with ViennaRNA, and uses masked ESM2
+inference to compare changed amino acids when an alternate protein can be reconstructed.
 
 **Prototype scope:** human substitutions/MNVs with equal-length REF and ALT alleles.
 """
@@ -176,13 +176,13 @@ Ensembl protein isoforms with ESM2 when a complete alternate protein can be reco
                 maximum=20,
                 value=5,
                 step=1,
-                label="ESM2 masked-position batch size",
+                label="ESM2 masked-sequence batch size",
             )
             esm_max_length = gr.Number(
                 value=1000,
                 precision=0,
                 label="Maximum protein length scored",
-                info="Longer isoforms remain in the table but are marked as not scored.",
+                info="ESM2 sees the full context once but scores only each masked changed position.",
             )
 
     run_button = gr.Button("Run complete DOGMA pipeline", variant="primary", elem_id="run-button")
@@ -204,7 +204,7 @@ Ensembl protein isoforms with ESM2 when a complete alternate protein can be reco
                 wrap=True,
                 elem_classes=["sequence-table"],
             )
-        with gr.Tab("ESM2 scores"):
+        with gr.Tab("ESM2 masked-position scores"):
             esm_output = gr.Dataframe(interactive=False, wrap=True)
 
     run_button.click(
