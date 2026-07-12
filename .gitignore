@@ -1,0 +1,33 @@
+# macOS and editor metadata
+.DS_Store
+.vscode/
+.idea/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Local application state and credentials
+.gradio/
+*.pem
+
+# Raw datasets and generated tabular results
+*.csv
+*.tsv
+*.txt
+!requirements.txt
+!**/requirements.txt
+
+# Generated analysis outputs
+APOL4_isoforms_output/
+dogma_gradio_outputs/
+dogma_outputs/
+example_output/
+
+# Preserve intentional placeholders
+!**/.gitkeep
