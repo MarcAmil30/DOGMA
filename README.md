@@ -99,10 +99,10 @@ The `dogma_gradio/dogma/` package contains the analysis code:
 - `vienna_service.py` places the fetched reference and alternate DNA windows in
   the gene's 5'-to-3' direction, converts them to RNA, folds both with
   ViennaRNA, and reports minimum free energy (MFE) and `ALT MFE - REF MFE`.
-- `esm_service.py` sends unique reference and resolvable alternate protein
-  sequences to ESM2. It reports likelihood and perplexity values plus the
-  alternate-minus-reference likelihood difference. It skips unresolved or
-  over-length sequences instead of inventing results.
+- `esm_service.py` masks each changed amino-acid position in the reference
+  protein and asks ESM2 for the reference and alternate residue probabilities
+  in one pass. It reports the alternate-minus-reference positional
+  log-probability and skips changes it cannot represent safely.
 - `pipeline.py` is the coordinator. It runs Ensembl VEP, AlphaGenome, gene and
   isoform selection, ViennaRNA, and ESM2 in order. It preserves partial results
   if an individual stage fails, writes the output tables and metadata, creates a

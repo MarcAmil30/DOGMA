@@ -90,9 +90,9 @@ records the error and preserves results from stages that succeeded.
 - `dogma/vienna_service.py` receives the Ensembl genomic window, places it in
   transcript orientation, converts DNA to RNA, folds REF and ALT with
   ViennaRNA, and calculates the MFE difference.
-- `dogma/esm_service.py` receives the Ensembl isoform table, removes duplicate
-  sequences, scores eligible REF and ALT proteins with ESM2, and calculates
-  alternate-minus-reference likelihood differences.
+- `dogma/esm_service.py` receives the Ensembl isoform table, masks each changed
+  amino-acid position in its reference-protein context, and uses a single ESM2
+  pass to calculate alternate-minus-reference positional log-probabilities.
 
 The ViennaRNA and ESM2 services call tools supplied by the separately installed
 `proto_tools` package.

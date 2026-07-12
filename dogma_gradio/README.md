@@ -16,9 +16,11 @@ dogma_gradio/
 │   ├── alphagenome_service.py     # Selected AlphaGenome scorers + filtering
 │   ├── ensembl_service.py         # VEP, genome sequence, transcripts, isoforms
 │   ├── vienna_service.py          # REF/ALT RNA folding
-│   ├── esm_service.py             # Reference/alternate protein scoring
+│   ├── esm_service.py             # Masked changed-position protein scoring
 │   └── pipeline.py                # Connects all three modalities
 ├── tests/
+│   ├── test_alphagenome_service.py
+│   ├── test_esm_service.py
 │   └── test_sequence_utils.py
 └── outputs/                       # One timestamped folder and ZIP per run
 ```
@@ -40,7 +42,7 @@ Install your existing project-specific `proto_tools` package in this same
 environment. Verify it with:
 
 ```bash
-python -c "from proto_tools import run_viennarna, run_esm2_score; print('proto_tools OK')"
+python -c "from proto_tools import run_viennarna, run_esm2_sample; print('proto_tools OK')"
 ```
 
 Run the app:
@@ -107,12 +109,26 @@ name. Ensembl VEP maps the variant to every translated transcript. The app:
    coordinate and the transcript CDS reference allele matches;
 4. leaves intronic, regulatory, and splice-only outcomes unresolved rather than
    inventing a protein sequence;
-5. scores reference proteins and resolvable alternate proteins with ESM2;
-6. reports `ALT - REF` average log-likelihood.
+5. finds the amino-acid positions that differ between each resolvable reference
+   and alternate protein;
+6. masks each changed position in the reference sequence and runs one ESM2
+   single-pass inference per unique masked context;
+7. reports the alternate-residue log-probability minus the reference-residue
+   log-probability at that position.
 
-A positive ESM delta means the alternate sequence is more likely under ESM2. It
-is not a pathogenicity probability and does not replace experimental or clinical
-interpretation.
+A positive ESM delta means ESM2 favours the alternate amino acid over the
+reference amino acid in the same protein context. A negative delta favours the
+reference amino acid. This position-specific score is not a whole-protein
+likelihood, a pathogenicity probability, or a replacement for experimental or
+clinical interpretation.
+
+This is much faster than pseudo-perplexity scoring of the complete protein:
+ESM2 still reads the surrounding sequence as context, but the app asks it to
+predict only the masked changed position instead of masking and scoring every
+residue in turn. Multi-amino-acid changes produce one output row per changed
+position. Length-changing, stop, non-canonical, synonymous, and unresolved
+outcomes are retained with an explanatory status rather than a misleading
+score.
 
 ## API-key handling
 
@@ -140,5 +156,6 @@ Every run creates:
 - Human GRCh38 only.
 - Equal-length substitutions/MNVs only for the complete pipeline.
 - ViennaRNA currently uses a genomic/pre-mRNA window, not spliced cDNA.
-- ESM2 scores only proteins no longer than the UI maximum.
+- Masked ESM2 scoring supports only canonical amino-acid substitutions in
+  proteins no longer than the UI maximum (and ESM2's 1,022-residue limit).
 - Model/API calls require internet access except local ESM2/ViennaRNA execution.

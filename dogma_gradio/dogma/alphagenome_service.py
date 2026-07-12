@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
@@ -50,12 +51,17 @@ def _recommended_scorer_map(variant_scorers: Any, organism: Any) -> dict[str, An
     mapping: dict[str, Any] = {}
 
     legacy_mapping = getattr(variant_scorers, "RECOMMENDED_VARIANT_SCORERS", None)
-    if isinstance(legacy_mapping, dict):
+    # AlphaGenome 0.7.0 exposes this as immutabledict, not a built-in dict.
+    if isinstance(legacy_mapping, Mapping):
         mapping.update({str(key).upper(): value for key, value in legacy_mapping.items()})
 
     get_recommended = getattr(variant_scorers, "get_recommended_scorers", None)
     if callable(get_recommended):
-        for scorer in get_recommended(organism):
+        # AlphaGenome 0.7.0 annotates this helper with the protobuf organism
+        # value (9606), while score_variant uses dna_client.Organism. Passing
+        # the enum directly makes the helper silently return an empty list.
+        scorer_organism = getattr(organism, "value", organism)
+        for scorer in get_recommended(scorer_organism):
             name = _scorer_name(scorer)
             if name:
                 mapping.setdefault(name, scorer)
