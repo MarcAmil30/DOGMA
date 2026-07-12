@@ -62,7 +62,11 @@ def test_scores_only_masked_changed_position(monkeypatch):
     assert len(result) == 1
     assert result.loc[0, "mutation"] == "A2C"
     assert result.loc[0, "esm_status"] == "masked_position_scored"
-    assert result.loc[0, "delta_position_log_probability_alt_minus_ref"] == -1.0
+    assert result.loc[0, "reference_score"] < 0
+    assert result.loc[0, "alternate_score"] < 0
+    assert result.loc[0, "difference_alt_minus_ref"] == -1.0
+    assert result.loc[0, "reference_sequence"] == "MAC"
+    assert result.loc[0, "alternate_sequence"] == "MCC"
     assert "reference_avg_log_likelihood" not in result.columns
 
 

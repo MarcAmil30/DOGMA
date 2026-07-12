@@ -187,14 +187,14 @@ def run_dogma_pipeline(
                 device=esm_device,
                 max_sequence_length=int(esm_max_sequence_length),
             )
-            score_column = "delta_position_log_probability_alt_minus_ref"
+            score_column = "difference_alt_minus_ref"
             resolved = (
                 int(esm_df[score_column].notna().sum())
                 if not esm_df.empty and score_column in esm_df.columns
                 else 0
             )
             statuses.append(
-                f"ESM2: success; transcript rows={len(esm_df):,}; "
+                f"ESM2: success; result rows={len(esm_df):,}; "
                 f"masked-position ALT-vs-REF comparisons={resolved:,}"
             )
         except Exception as exc:
@@ -216,9 +216,9 @@ def run_dogma_pipeline(
         ),
         "esm_rows": len(esm_df),
         "esm_alt_ref_comparisons": (
-            int(esm_df["delta_position_log_probability_alt_minus_ref"].notna().sum())
+            int(esm_df["difference_alt_minus_ref"].notna().sum())
             if not esm_df.empty
-            and "delta_position_log_probability_alt_minus_ref" in esm_df.columns
+            and "difference_alt_minus_ref" in esm_df.columns
             else 0
         ),
     }

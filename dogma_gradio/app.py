@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import html
 from pathlib import Path
 
 import gradio as gr
@@ -16,6 +17,54 @@ from dogma.pipeline import run_dogma_pipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = PROJECT_ROOT / "outputs"
+
+
+def _highlight_alternate_sequence(reference: str, alternate: str) -> str:
+    """Render ALT sequence with residues that differ from REF in red."""
+    pieces = []
+    for index, residue in enumerate(alternate):
+        escaped = html.escape(residue)
+        if index >= len(reference) or residue != reference[index]:
+            pieces.append(f'<span class="esm-alt-change">{escaped}</span>')
+        else:
+            pieces.append(escaped)
+    return "".join(pieces)
+
+
+def esm_sequence_html(esm_df: pd.DataFrame) -> str:
+    """Build a readable sequence comparison for the ESM2 result tab."""
+    if esm_df is None or esm_df.empty:
+        return "<p>No ESM2 result rows were produced.</p>"
+
+    scored = esm_df[esm_df.get("esm_status", pd.Series(dtype=str)) == "masked_position_scored"]
+    if scored.empty:
+        statuses = ", ".join(
+            sorted(set(esm_df.get("esm_status", pd.Series(dtype=str)).dropna().astype(str)))
+        )
+        return (
+            '<div class="esm-unresolved"><strong>No amino-acid substitution could be scored.</strong><br>'
+            "This variant did not produce a directly reconstructable alternate protein. "
+            "Splice and intronic variants require a separate splice/transcript model before ESM2."
+            f"<br><small>Status: {html.escape(statuses)}</small></div>"
+        )
+
+    blocks = []
+    for _, row in scored.iterrows():
+        reference = str(row.get("reference_sequence") or "")
+        alternate = str(row.get("alternate_sequence") or "")
+        label = " · ".join(
+            html.escape(str(value))
+            for value in (row.get("transcript_id"), row.get("mutation"))
+            if pd.notna(value)
+        )
+        blocks.append(
+            '<div class="esm-sequence-block">'
+            f"<strong>{label}</strong>"
+            f'<div><span class="esm-seq-label">REF</span><code>{html.escape(reference)}</code></div>'
+            f'<div><span class="esm-seq-label esm-alt-label">ALT</span><code>{_highlight_alternate_sequence(reference, alternate)}</code></div>'
+            "</div>"
+        )
+    return "".join(blocks)
 
 
 def run_from_ui(
@@ -69,6 +118,7 @@ def run_from_ui(
             result["isoform_df"],
             result["protein_sequences_df"],
             result["esm_df"],
+            esm_sequence_html(result["esm_df"]),
             result["zip_path"],
         )
     except Exception as exc:
@@ -80,6 +130,7 @@ def run_from_ui(
             empty,
             empty,
             empty,
+            "<p>ESM2 did not run.</p>",
             None,
         )
 
@@ -87,6 +138,10 @@ def run_from_ui(
 CSS = """
 #run-button { min-height: 52px; font-size: 18px; font-weight: 700; }
 .sequence-table textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.esm-sequence-block, .esm-unresolved { margin: 10px 0; padding: 10px; border: 1px solid #ddd; border-radius: 6px; }
+.esm-sequence-block code { white-space: pre-wrap; overflow-wrap: anywhere; color: inherit; }
+.esm-seq-label { display: inline-block; width: 3rem; font-weight: 700; }
+.esm-alt-label, .esm-alt-change { color: #d11a2a; font-weight: 700; }
 """
 
 
@@ -205,6 +260,7 @@ inference to compare changed amino acids when an alternate protein can be recons
                 elem_classes=["sequence-table"],
             )
         with gr.Tab("ESM2 masked-position scores"):
+            esm_sequence_output = gr.HTML(label="REF/ALT sequence comparison")
             esm_output = gr.Dataframe(interactive=False, wrap=True)
 
     run_button.click(
@@ -234,6 +290,7 @@ inference to compare changed amino acids when an alternate protein can be recons
             isoform_output,
             protein_output,
             esm_output,
+            esm_sequence_output,
             download,
         ],
     )

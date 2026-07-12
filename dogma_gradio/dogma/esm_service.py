@@ -26,6 +26,8 @@ def _log_softmax(logits: list[float]) -> list[float]:
 
 
 def _base_row(item: pd.Series) -> dict[str, Any]:
+    reference = item.get("reference_protein")
+    alternate = item.get("alternate_protein")
     return {
         "gene_name": item.get("gene_name"),
         "reference_isoform": item.get("reference_isoform"),
@@ -38,6 +40,8 @@ def _base_row(item: pd.Series) -> dict[str, Any]:
         "alternate_status": item.get("alternate_status"),
         "reference_aa_length": item.get("reference_aa_length"),
         "alternate_aa_length": item.get("alternate_aa_length"),
+        "reference_sequence": reference if isinstance(reference, str) else None,
+        "alternate_sequence": alternate if isinstance(alternate, str) else None,
     }
 
 
@@ -75,7 +79,13 @@ def run_esm_for_isoforms(
         alternate = str(alternate) if isinstance(alternate, str) else None
 
         if reference is None:
-            rows.append({**base, "esm_status": "reference_not_available"})
+            rows.append(
+                {
+                    **base,
+                    "esm_status": "reference_not_available",
+                    "esm_explanation": "No reference protein sequence was available.",
+                }
+            )
             continue
         if alternate is None:
             rows.append(
@@ -83,6 +93,11 @@ def run_esm_for_isoforms(
                     **base,
                     "esm_status": str(
                         item.get("alternate_status") or "alternate_not_resolved"
+                    ),
+                    "esm_explanation": (
+                        "No alternate protein was reconstructed. Splice, intronic, "
+                        "and regulatory variants do not define a direct amino-acid "
+                        "substitution for masked ESM2 scoring."
                     ),
                 }
             )
@@ -92,6 +107,7 @@ def run_esm_for_isoforms(
                 {
                     **base,
                     "esm_status": f"reference_not_scored_length_gt_{max_sequence_length}",
+                    "esm_explanation": "The reference protein exceeds the configured ESM2 length limit.",
                 }
             )
             continue
@@ -100,6 +116,9 @@ def run_esm_for_isoforms(
                 {
                     **base,
                     "esm_status": "not_scored_protein_length_change",
+                    "esm_explanation": (
+                        "Masked substitution scoring requires equal-length REF and ALT proteins."
+                    ),
                 }
             )
             continue
@@ -112,7 +131,13 @@ def run_esm_for_isoforms(
             if reference_aa != alternate_aa
         ]
         if not changed_positions:
-            rows.append({**base, "esm_status": "no_amino_acid_change"})
+            rows.append(
+                {
+                    **base,
+                    "esm_status": "no_amino_acid_change",
+                    "esm_explanation": "REF and ALT translate to the same protein sequence.",
+                }
+            )
             continue
 
         for index in changed_positions:
@@ -129,6 +154,10 @@ def run_esm_for_isoforms(
                         "reference_aa": reference_aa,
                         "alternate_aa": alternate_aa,
                         "esm_status": "not_scored_noncanonical_or_stop_residue",
+                        "esm_explanation": (
+                            "The change contains a stop or non-canonical residue that is "
+                            "outside the 20-amino-acid ESM2 scoring alphabet."
+                        ),
                     }
                 )
                 continue
@@ -141,8 +170,6 @@ def run_esm_for_isoforms(
                     "mutation_position": index + 1,
                     "reference_aa": reference_aa,
                     "alternate_aa": alternate_aa,
-                    "reference_sequence": reference,
-                    "alternate_sequence": alternate,
                     "masked_reference_sequence": masked_sequence,
                 }
             )
@@ -204,13 +231,41 @@ def run_esm_for_isoforms(
             rows.append(
                 {
                     **item,
-                    "reference_position_log_probability": reference_log_probability,
-                    "alternate_position_log_probability": alternate_log_probability,
-                    "delta_position_log_probability_alt_minus_ref": (
+                    "reference_score": reference_log_probability,
+                    "alternate_score": alternate_log_probability,
+                    "difference_alt_minus_ref": (
                         alternate_log_probability - reference_log_probability
                     ),
                     "esm_status": "masked_position_scored",
+                    "esm_explanation": (
+                        "Scores are log-probabilities for REF and ALT at the masked "
+                        "amino-acid position in the same reference-protein context."
+                    ),
                 }
             )
 
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    preferred_columns = [
+        "gene_name",
+        "reference_isoform",
+        "alternate_isoform",
+        "transcript_id",
+        "protein_id",
+        "is_ensembl_canonical",
+        "consequence_terms",
+        "mutation",
+        "mutation_position",
+        "reference_aa",
+        "alternate_aa",
+        "reference_score",
+        "alternate_score",
+        "difference_alt_minus_ref",
+        "reference_sequence",
+        "alternate_sequence",
+        "masked_reference_sequence",
+        "esm_status",
+        "esm_explanation",
+    ]
+    visible = [column for column in preferred_columns if column in result.columns]
+    remaining = [column for column in result.columns if column not in visible]
+    return result[visible + remaining]
