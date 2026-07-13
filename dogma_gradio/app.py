@@ -8,6 +8,7 @@ import gradio as gr
 
 
 SUPPORTED_SUFFIXES = {".vcf", ".csv", ".txt"}
+GRADIO_MAJOR_VERSION = int(gr.__version__.split(".", maxsplit=1)[0])
 
 
 def _as_paths(files: str | Iterable[str] | None) -> list[Path]:
@@ -186,7 +187,12 @@ CSS = """
 """
 
 
-with gr.Blocks(title="DOGMA", css=CSS, theme=gr.themes.Base()) as demo:
+blocks_options = {"title": "DOGMA"}
+if GRADIO_MAJOR_VERSION < 6:
+    blocks_options.update(css=CSS, theme=gr.themes.Base())
+
+
+with gr.Blocks(**blocks_options) as demo:
     with gr.Column(elem_id="dogma-shell"):
         gr.Markdown(
             """
@@ -223,19 +229,31 @@ Add your known **pathogenic** and **benign** variants. DOGMA accepts `.vcf`,
             elem_id="format-note",
         )
 
+        event_options = {}
+        if GRADIO_MAJOR_VERSION < 6:
+            event_options.update(api_name=False, show_api=False)
+        else:
+            event_options.update(api_visibility="private")
+
         review_button.click(
             fn=review_uploads,
             inputs=[pathogenic_files, benign_files],
             outputs=upload_status,
-            api_name=False,
-            show_api=False,
+            **event_options,
         )
 
 
 if __name__ == "__main__":
+    launch_options = {
+        "server_name": os.getenv("DOGMA_HOST", "127.0.0.1"),
+        "server_port": int(os.getenv("DOGMA_PORT", "7860")),
+        "show_error": True,
+    }
+    if GRADIO_MAJOR_VERSION < 6:
+        launch_options["show_api"] = False
+    else:
+        launch_options.update(theme=gr.themes.Base(), css=CSS)
+
     demo.queue(default_concurrency_limit=1).launch(
-        server_name=os.getenv("DOGMA_HOST", "127.0.0.1"),
-        server_port=int(os.getenv("DOGMA_PORT", "7860")),
-        show_error=True,
-        show_api=False,
+        **launch_options,
     )
