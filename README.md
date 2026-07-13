@@ -75,10 +75,10 @@ Generated caches and local environments such as `__pycache__/`,
 
 ## How the Gradio application is organised
 
-`dogma_gradio/app.py` contains the user interface. It collects the API key,
-variant, AlphaGenome tracks, ontology terms, RNA window size, optional gene,
-and ESM2 settings. It passes those values to the pipeline and displays the
-returned tables. It does not perform biological analysis itself.
+`dogma_gradio/app.py` contains the user interface. Its minimal landing page
+collects separate known pathogenic and benign cohorts as `.vcf`, `.csv`, or
+`.txt` files, validates the two uploads, and shows their row counts. It does not
+perform biological analysis itself.
 
 The `dogma_gradio/dogma/` package contains the analysis code:
 

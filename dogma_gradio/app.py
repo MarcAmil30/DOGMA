@@ -1,299 +1,235 @@
 from __future__ import annotations
 
 import os
-import html
 from pathlib import Path
+from typing import Iterable
 
 import gradio as gr
-import pandas as pd
-
-from dogma.alphagenome_service import (
-    ALPHAGENOME_TRACK_CHOICES,
-    SEQUENCE_LENGTH_CHOICES,
-)
-from dogma.esm_service import ESM_MODEL_CHOICES
-from dogma.pipeline import run_dogma_pipeline
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-OUTPUT_ROOT = PROJECT_ROOT / "outputs"
+SUPPORTED_SUFFIXES = {".vcf", ".csv", ".txt"}
 
 
-def _highlight_alternate_sequence(reference: str, alternate: str) -> str:
-    """Render ALT sequence with residues that differ from REF in red."""
-    pieces = []
-    for index, residue in enumerate(alternate):
-        escaped = html.escape(residue)
-        if index >= len(reference) or residue != reference[index]:
-            pieces.append(f'<span class="esm-alt-change">{escaped}</span>')
-        else:
-            pieces.append(escaped)
-    return "".join(pieces)
+def _as_paths(files: str | Iterable[str] | None) -> list[Path]:
+    """Normalise the values returned by Gradio's single/multiple file inputs."""
+    if not files:
+        return []
+    if isinstance(files, (str, os.PathLike)):
+        files = [files]
+    return [Path(file) for file in files]
 
 
-def esm_sequence_html(esm_df: pd.DataFrame) -> str:
-    """Build a readable sequence comparison for the ESM2 result tab."""
-    if esm_df is None or esm_df.empty:
-        return "<p>No ESM2 result rows were produced.</p>"
+def _variant_count(path: Path) -> int:
+    """Return a lightweight row count without loading a potentially large file."""
+    suffix = path.suffix.lower()
+    count = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("##"):
+                continue
+            if suffix == ".vcf" and line.startswith("#"):
+                continue
+            count += 1
 
-    scored = esm_df[esm_df.get("esm_status", pd.Series(dtype=str)) == "masked_position_scored"]
-    if scored.empty:
-        statuses = ", ".join(
-            sorted(set(esm_df.get("esm_status", pd.Series(dtype=str)).dropna().astype(str)))
+    if suffix == ".vcf":
+        return count
+
+    # CSV/TXT inputs may have either a conventional header or a VEP-style
+    # header beginning with '#'. In both cases the first content row is a header.
+    return max(count - 1, 0)
+
+
+def review_uploads(
+    pathogenic_files: str | list[str] | None,
+    benign_files: str | list[str] | None,
+) -> str:
+    """Validate the two labelled cohorts and show a compact upload summary."""
+    cohorts = {
+        "Pathogenic": _as_paths(pathogenic_files),
+        "Benign": _as_paths(benign_files),
+    }
+    problems: list[str] = []
+    summaries: list[str] = []
+
+    for label, paths in cohorts.items():
+        if not paths:
+            problems.append(f"Add at least one {label.lower()} file.")
+            continue
+
+        unsupported = [path.name for path in paths if path.suffix.lower() not in SUPPORTED_SUFFIXES]
+        if unsupported:
+            problems.append(f"{label}: unsupported file type — {', '.join(unsupported)}")
+            continue
+
+        try:
+            count = sum(_variant_count(path) for path in paths)
+        except OSError as exc:
+            problems.append(f"{label}: could not read the upload ({exc}).")
+            continue
+
+        file_word = "file" if len(paths) == 1 else "files"
+        variant_word = "variant row" if count == 1 else "variant rows"
+        summaries.append(
+            f"<strong>{label}:</strong> {len(paths)} {file_word} · "
+            f"{count:,} {variant_word}"
         )
-        return (
-            '<div class="esm-unresolved"><strong>No amino-acid substitution could be scored.</strong><br>'
-            "This variant did not produce a directly reconstructable alternate protein. "
-            "Splice and intronic variants require a separate splice/transcript model before ESM2."
-            f"<br><small>Status: {html.escape(statuses)}</small></div>"
-        )
 
-    blocks = []
-    for _, row in scored.iterrows():
-        reference = str(row.get("reference_sequence") or "")
-        alternate = str(row.get("alternate_sequence") or "")
-        label = " · ".join(
-            html.escape(str(value))
-            for value in (row.get("transcript_id"), row.get("mutation"))
-            if pd.notna(value)
-        )
-        blocks.append(
-            '<div class="esm-sequence-block">'
-            f"<strong>{label}</strong>"
-            f'<div><span class="esm-seq-label">REF</span><code>{html.escape(reference)}</code></div>'
-            f'<div><span class="esm-seq-label esm-alt-label">ALT</span><code>{_highlight_alternate_sequence(reference, alternate)}</code></div>'
-            "</div>"
-        )
-    return "".join(blocks)
+    if problems:
+        return "### Almost there\n" + "\n".join(f"- {problem}" for problem in problems)
 
-
-def run_from_ui(
-    api_key: str,
-    chromosome: str,
-    position: float,
-    reference_bases: str,
-    alternate_bases: str,
-    sequence_length_label: str,
-    ontology_text: str,
-    selected_tracks: list[str],
-    vienna_flank_bp: float,
-    gene_symbol_override: str,
-    vienna_temperature: float,
-    esm_model_checkpoint: str,
-    esm_batch_size: float,
-    esm_device: str,
-    esm_max_sequence_length: float,
-    progress: gr.Progress = gr.Progress(),
-):
-    empty = pd.DataFrame()
-
-    def update_progress(value: float, description: str) -> None:
-        progress(value, desc=description)
-
-    try:
-        result = run_dogma_pipeline(
-            api_key=api_key,
-            chromosome=chromosome,
-            position=int(position),
-            reference_bases=reference_bases,
-            alternate_bases=alternate_bases,
-            sequence_length_label=sequence_length_label,
-            selected_tracks=selected_tracks or [],
-            ontology_text=ontology_text,
-            vienna_flank_bp=int(vienna_flank_bp),
-            gene_symbol_override=gene_symbol_override,
-            vienna_temperature=float(vienna_temperature),
-            esm_model_checkpoint=esm_model_checkpoint,
-            esm_batch_size=int(esm_batch_size),
-            esm_device=esm_device,
-            esm_max_sequence_length=int(esm_max_sequence_length),
-            output_root=OUTPUT_ROOT,
-            progress_callback=update_progress,
-        )
-        return (
-            result["status_markdown"],
-            result["summary_df"],
-            result["alphagenome_df"],
-            result["vienna_df"],
-            result["isoform_df"],
-            result["protein_sequences_df"],
-            result["esm_df"],
-            esm_sequence_html(result["esm_df"]),
-            result["zip_path"],
-        )
-    except Exception as exc:
-        return (
-            f"### DOGMA run failed\n- ❌ {type(exc).__name__}: {exc}",
-            empty,
-            empty,
-            empty,
-            empty,
-            empty,
-            empty,
-            "<p>ESM2 did not run.</p>",
-            None,
-        )
+    return (
+        '<div class="upload-success">'
+        '<span class="success-mark">✓</span>'
+        '<div><strong>Files are ready</strong><br>'
+        + "<br>".join(summaries)
+        + "</div></div>"
+    )
 
 
 CSS = """
-#run-button { min-height: 52px; font-size: 18px; font-weight: 700; }
-.sequence-table textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.esm-sequence-block, .esm-unresolved { margin: 10px 0; padding: 10px; border: 1px solid #ddd; border-radius: 6px; }
-.esm-sequence-block code { white-space: pre-wrap; overflow-wrap: anywhere; color: inherit; }
-.esm-seq-label { display: inline-block; width: 3rem; font-weight: 700; }
-.esm-alt-label, .esm-alt-change { color: #d11a2a; font-weight: 700; }
+:root {
+  --dogma-ink: #202123;
+  --dogma-muted: #6b6f76;
+  --dogma-line: #dedede;
+  --dogma-soft: #f7f7f8;
+  --dogma-accent: #10a37f;
+}
+
+.gradio-container {
+  background: #ffffff;
+  color: var(--dogma-ink);
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#dogma-shell {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: clamp(48px, 10vh, 110px) 24px 48px;
+}
+
+#dogma-hero { text-align: center; margin-bottom: 34px; }
+#dogma-hero h1 {
+  margin: 0 0 12px;
+  font-size: clamp(34px, 6vw, 50px);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  line-height: 1.08;
+}
+#dogma-hero p {
+  max-width: 570px;
+  margin: 0 auto;
+  color: var(--dogma-muted);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+#upload-row { gap: 14px; }
+.upload-card {
+  border: 1px solid var(--dogma-line) !important;
+  border-radius: 18px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+  overflow: hidden;
+}
+.upload-card:hover { border-color: #b8bbbe !important; }
+.upload-card label { font-weight: 600 !important; }
+.upload-card .wrap { min-height: 158px; }
+
+#continue-button {
+  margin-top: 12px;
+  min-height: 48px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--dogma-ink);
+  color: white;
+  font-weight: 600;
+}
+#continue-button:hover { background: #000; }
+
+#upload-status { margin-top: 14px; }
+#upload-status h3 { text-align: center; font-size: 17px; }
+.upload-success {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: #f1faf7;
+  color: #185c4b;
+  line-height: 1.5;
+}
+.success-mark {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--dogma-accent);
+  color: white;
+  font-weight: 700;
+}
+
+#format-note {
+  margin-top: 24px;
+  text-align: center;
+  color: var(--dogma-muted);
+  font-size: 13px;
+}
+#format-note p { margin: 0; }
+
+@media (max-width: 640px) {
+  #dogma-shell { padding: 42px 16px 28px; }
+  #upload-row { flex-direction: column; }
+}
 """
 
 
-with gr.Blocks(title="DOGMA: DNA → RNA → Protein") as demo:
-    gr.Markdown(
-        """
-# DOGMA variant pipeline
-Enter one **GRCh38** variant. The app runs selected AlphaGenome variant scorers,
-folds a strand-aware local RNA window with ViennaRNA, and uses masked ESM2
-inference to compare changed amino acids when an alternate protein can be reconstructed.
+with gr.Blocks(title="DOGMA", css=CSS, theme=gr.themes.Base()) as demo:
+    with gr.Column(elem_id="dogma-shell"):
+        gr.Markdown(
+            """
+# Drop your variant files
 
-**Prototype scope:** human substitutions/MNVs with equal-length REF and ALT alleles.
-"""
-    )
+Add your known **pathogenic** and **benign** variants. DOGMA accepts `.vcf`,
+`.csv`, and `.txt` files.
+""",
+            elem_id="dogma-hero",
+        )
 
-    with gr.Row():
-        with gr.Column(scale=1):
-            gr.Markdown("## 1. AlphaGenome access")
-            api_key = gr.Textbox(
-                label="AlphaGenome API key",
-                type="password",
-                placeholder="Paste key here; it is not written to the output files",
+        with gr.Row(elem_id="upload-row"):
+            pathogenic_files = gr.File(
+                label="Pathogenic variants",
+                file_count="multiple",
+                file_types=[".vcf", ".csv", ".txt"],
+                type="filepath",
+                elem_classes=["upload-card"],
             )
-            sequence_length = gr.Dropdown(
-                choices=SEQUENCE_LENGTH_CHOICES,
-                value="100KB",
-                label="AlphaGenome sequence length",
-            )
-            ontology_text = gr.Textbox(
-                value="UBERON:0002046",
-                label="Ontology CURIE(s)",
-                info="Comma-separated. Leave blank to keep all tracks returned by the selected scorers.",
-            )
-            selected_tracks = gr.CheckboxGroup(
-                choices=ALPHAGENOME_TRACK_CHOICES,
-                value=["RNA_SEQ", "ATAC"],
-                label="AlphaGenome outputs / recommended scorers",
+            benign_files = gr.File(
+                label="Benign variants",
+                file_count="multiple",
+                file_types=[".vcf", ".csv", ".txt"],
+                type="filepath",
+                elem_classes=["upload-card"],
             )
 
-        with gr.Column(scale=1):
-            gr.Markdown("## 2. Variant")
-            chromosome = gr.Textbox(value="chr22", label="Chromosome")
-            position = gr.Number(value=36201698, precision=0, label="1-based position")
-            with gr.Row():
-                reference_bases = gr.Textbox(value="A", label="Reference allele")
-                alternate_bases = gr.Textbox(value="C", label="Alternate allele")
-            gene_symbol_override = gr.Textbox(
-                value="",
-                label="Gene-symbol override (optional)",
-                placeholder="Leave blank to auto-select; e.g. APOL4",
-                info=(
-                    "Auto-selection uses the strongest protein-coding AlphaGenome gene row, "
-                    "then falls back to Ensembl VEP."
-                ),
-            )
+        review_button = gr.Button("Continue", elem_id="continue-button")
+        upload_status = gr.Markdown(elem_id="upload-status")
 
-        with gr.Column(scale=1):
-            gr.Markdown("## 3. RNA and protein settings")
-            vienna_flank_bp = gr.Slider(
-                minimum=10,
-                maximum=250,
-                value=50,
-                step=1,
-                label="ViennaRNA bases on each side of the variant",
-                info="50 gives REF/ALT windows of 101 nt for an SNV.",
-            )
-            vienna_temperature = gr.Slider(
-                minimum=20,
-                maximum=45,
-                value=37,
-                step=0.5,
-                label="ViennaRNA temperature (°C)",
-            )
-            esm_model = gr.Dropdown(
-                choices=ESM_MODEL_CHOICES,
-                value="esm2_t30_150M_UR50D",
-                label="ESM2 model",
-            )
-            esm_device = gr.Dropdown(
-                choices=["cpu", "cuda"],
-                value="cpu",
-                label="ESM2 device",
-                info="Use CPU on an Apple laptop unless your proto_tools build explicitly supports another backend.",
-            )
-            esm_batch_size = gr.Slider(
-                minimum=1,
-                maximum=20,
-                value=5,
-                step=1,
-                label="ESM2 masked-sequence batch size",
-            )
-            esm_max_length = gr.Number(
-                value=1000,
-                precision=0,
-                label="Maximum protein length scored",
-                info="ESM2 sees the full context once but scores only each masked changed position.",
-            )
+        gr.Markdown(
+            "A VCF is not automatically pathogenic or benign. If it has no "
+            "clinical-significance annotation, DOGMA uses the upload box as its label.",
+            elem_id="format-note",
+        )
 
-    run_button = gr.Button("Run complete DOGMA pipeline", variant="primary", elem_id="run-button")
-    status = gr.Markdown()
-    download = gr.File(label="Download all result tables (.zip)")
-
-    with gr.Tabs():
-        with gr.Tab("DOGMA summary"):
-            summary_output = gr.Dataframe(interactive=False, wrap=True)
-        with gr.Tab("AlphaGenome scores"):
-            alpha_output = gr.Dataframe(interactive=False, wrap=True)
-        with gr.Tab("ViennaRNA scores"):
-            vienna_output = gr.Dataframe(interactive=False, wrap=True)
-        with gr.Tab("Ensembl transcript mapping"):
-            isoform_output = gr.Dataframe(interactive=False, wrap=True)
-        with gr.Tab("Protein sequences"):
-            protein_output = gr.Dataframe(
-                interactive=False,
-                wrap=True,
-                elem_classes=["sequence-table"],
-            )
-        with gr.Tab("ESM2 masked-position scores"):
-            esm_sequence_output = gr.HTML(label="REF/ALT sequence comparison")
-            esm_output = gr.Dataframe(interactive=False, wrap=True)
-
-    run_button.click(
-        fn=run_from_ui,
-        inputs=[
-            api_key,
-            chromosome,
-            position,
-            reference_bases,
-            alternate_bases,
-            sequence_length,
-            ontology_text,
-            selected_tracks,
-            vienna_flank_bp,
-            gene_symbol_override,
-            vienna_temperature,
-            esm_model,
-            esm_batch_size,
-            esm_device,
-            esm_max_length,
-        ],
-        outputs=[
-            status,
-            summary_output,
-            alpha_output,
-            vienna_output,
-            isoform_output,
-            protein_output,
-            esm_output,
-            esm_sequence_output,
-            download,
-        ],
-    )
+        review_button.click(
+            fn=review_uploads,
+            inputs=[pathogenic_files, benign_files],
+            outputs=upload_status,
+            api_name=False,
+            show_api=False,
+        )
 
 
 if __name__ == "__main__":
@@ -301,5 +237,5 @@ if __name__ == "__main__":
         server_name=os.getenv("DOGMA_HOST", "127.0.0.1"),
         server_port=int(os.getenv("DOGMA_PORT", "7860")),
         show_error=True,
-        css=CSS,
+        show_api=False,
     )

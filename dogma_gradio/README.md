@@ -1,7 +1,7 @@
 # DOGMA Gradio prototype
 
-A modular **DNA → RNA → protein** variant pipeline for a single human GRCh38
-substitution/MNV.
+A modular **DNA → RNA → protein** variant project with a minimal cohort-upload
+landing page for known pathogenic and benign variants.
 
 ## File structure
 
@@ -25,8 +25,14 @@ dogma_gradio/
 └── outputs/                       # One timestamped folder and ZIP per run
 ```
 
-The UI never contains analysis logic. Each model/API has one service file, and
-`pipeline.py` is the only place that connects them.
+The landing page accepts separate `.vcf`, `.csv`, or `.txt` pathogenic and
+benign cohorts, validates that both labels are present, and reports their row
+counts. A VCF is only intrinsically labelled when it contains a clinical
+significance annotation such as ClinVar `CLNSIG`; otherwise the selected upload
+box supplies the label.
+
+The UI never contains biological analysis logic. Each model/API has one service
+file, and `pipeline.py` is the only place that connects them.
 
 ## Installation
 
